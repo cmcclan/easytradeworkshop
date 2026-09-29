@@ -179,6 +179,9 @@ services:
       PROXY_PREFIX: credit-card-order-service
       MSSQL_CONNECTIONSTRING: *java-connection-string
       THIRD_PARTY_SERVICE_HOSTANDPORT: third-party-service:8080
+      BITCOIN_PAYMENT_SERVICE_HOSTANDPORT: bitcoin-payment-service:8080
+      BITCOIN_PAYMENT_DELAY: 30
+      BITCOIN_PAYMENT_RATE: 60
       <<: *feature-flag-service-env
       WORK_DELAY: 300
       WORK_RATE: 900

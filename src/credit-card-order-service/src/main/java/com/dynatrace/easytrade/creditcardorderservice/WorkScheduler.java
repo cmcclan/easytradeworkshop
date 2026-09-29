@@ -13,14 +13,24 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
+import java.time.Duration;
 import java.util.List;
 
 @Service
 public class WorkScheduler extends BaseScheduler {
     private static final Logger logger = LoggerFactory.getLogger(WorkScheduler.class);
+    // third-party-service is the slowest hop in the flow (p99 ~5.5s). Bound the
+    // call so a burst of slow manufacturer lookups can't hold worker threads /
+    // outbound connections open indefinitely and exhaust the shared pool — the
+    // #1 failure mode identified for 100x peak traffic. The request timeout is
+    // set just above the observed p99 so healthy-but-slow calls still succeed.
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(3);
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(6);
     private final DatabaseHelper dbHelper;
     private final String creditCardOrderService = System.getenv("THIRD_PARTY_SERVICE_HOSTANDPORT");
-    private final HttpClient httpClient = HttpClient.newBuilder().build();
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(CONNECT_TIMEOUT)
+            .build();
 
     public WorkScheduler(DatabaseHelper dbHelper) {
         super("work", Integer.parseInt(System.getenv("WORK_DELAY")), Integer.parseInt(System.getenv("WORK_RATE")));
@@ -36,26 +46,11 @@ public class WorkScheduler extends BaseScheduler {
             ObjectMapper mapper = new ObjectMapper();
 
             for (String orderId : orders) {
-                logger.info("Calling manufacturer for order: " + orderId);
-                ManufactureRequest body = dbHelper.getCreditCardManufactureData(conn, orderId);
-
-                // deepcode ignore Ssrf: trusted environment variable
-                HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(String.format("http://%s/v1/manufacturer", creditCardOrderService)))
-                        .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
-                        .header("Content-Type", "application/json")
-                        .build();
-
-                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-                StandardResponse standardResponse = mapper.readValue(response.body(), StandardResponse.class);
-
-                if (standardResponse.statusCode() == HttpStatus.OK.value()) {
-                    logger.info("Ordered the manufacture of card with orderId: {}", orderId);
-                    dbHelper.insertNewStatus(orderId, StatusType.CARD_ORDERED);
-                } else {
-                    logger.info("Failed to order card manufacture. Status code received is {}, and the message is: {}",
-                            standardResponse.statusCode(), standardResponse.message());
-                }
+                // Isolate each order: a timeout or error on one manufacturer call must
+                // not abort the whole batch (which would starve the remaining orders and
+                // grow the backlog under 100x load). Failed orders stay ORDER_CREATED and
+                // are retried on the next pass.
+                callManufacturer(mapper, orderId);
             }
         } catch (Exception e) {
             logger.error("Caught exception while running WorkScheduler's task: " + e.getMessage(), e);
@@ -64,5 +59,37 @@ public class WorkScheduler extends BaseScheduler {
         logger.info("Finished WorkScheduler task!");
 
         randomFixedRatePlusSleep();
+    }
+
+    private void callManufacturer(ObjectMapper mapper, String orderId) {
+        try (Connection conn = dbHelper.getConnection()) {
+            logger.info("Calling manufacturer for order: " + orderId);
+            ManufactureRequest body = dbHelper.getCreditCardManufactureData(conn, orderId);
+
+            // deepcode ignore Ssrf: trusted environment variable
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(String.format("http://%s/v1/manufacturer", creditCardOrderService)))
+                    .timeout(REQUEST_TIMEOUT)
+                    .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
+                    .header("Content-Type", "application/json")
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            StandardResponse standardResponse = mapper.readValue(response.body(), StandardResponse.class);
+
+            if (standardResponse.statusCode() == HttpStatus.OK.value()) {
+                logger.info("Ordered the manufacture of card with orderId: {}", orderId);
+                dbHelper.insertNewStatus(orderId, StatusType.CARD_ORDERED);
+            } else {
+                logger.info("Failed to order card manufacture. Status code received is {}, and the message is: {}",
+                        standardResponse.statusCode(), standardResponse.message());
+            }
+        } catch (java.net.http.HttpTimeoutException e) {
+            logger.warn("Manufacturer call timed out for order {}; leaving as ORDER_CREATED to retry next pass.",
+                    orderId);
+        } catch (Exception e) {
+            logger.error("Failed to call manufacturer for order " + orderId
+                    + "; leaving as ORDER_CREATED to retry next pass.", e);
+        }
     }
 }

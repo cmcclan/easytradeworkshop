@@ -10,6 +10,9 @@ public enum StatusType {
     CARD_ERROR(30, "card_error", "There occurred an error during card manufacture."),
     CARD_SHIPPED(40, "card_shipped", "Card has been shipped to the client."),
     CARD_DELIVERED(50, "card_delivered", "Card has been received by the client."),
+    BITCOIN_PAYMENT_PENDING(60, "bitcoin_payment_pending", "A bitcoin payment has been initiated and is awaiting settlement."),
+    BITCOIN_PAYMENT_CONFIRMED(70, "bitcoin_payment_confirmed", "The bitcoin payment has been confirmed by the payment provider."),
+    BITCOIN_PAYMENT_FAILED(71, "bitcoin_payment_failed", "The bitcoin payment could not be settled with the payment provider."),
     SEQUENCE_ERROR(99, "sequence_error", "Wrong sequence of status occurred. Please verify the whole process!")
     ;
 

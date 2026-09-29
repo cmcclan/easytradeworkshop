@@ -18,6 +18,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.dynatrace.easytrade.creditcardorderservice.models.BitcoinPaymentRequest;
+import com.dynatrace.easytrade.creditcardorderservice.models.BitcoinPaymentResponse;
+import com.dynatrace.easytrade.creditcardorderservice.models.BitcoinSettlementRequest;
 import com.dynatrace.easytrade.creditcardorderservice.models.CreditCardOrderRequest;
 import com.dynatrace.easytrade.creditcardorderservice.models.CreditCardOrderResponse;
 import com.dynatrace.easytrade.creditcardorderservice.models.CreditCardOrderStatus;
@@ -29,6 +32,7 @@ import com.dynatrace.easytrade.creditcardorderservice.models.ShippingIdRequest;
 import com.dynatrace.easytrade.creditcardorderservice.models.StandardResponse;
 import com.dynatrace.easytrade.creditcardorderservice.models.StatusRequest;
 import com.dynatrace.easytrade.creditcardorderservice.models.StatusType;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
@@ -61,6 +65,8 @@ public class OrderController {
     public static final String WRONG_SEQUENCE = "%s Tried to update from %s to %s!";
     public static final String ORDER_CREATED = "Credit card order has been created.";
     public static final String ORDER_ALREADY_EXISTS = "A credit card order for given accountId already exists!";
+    public static final String BITCOIN_PAYMENT_ACCEPTED = "Bitcoin payment accepted and is being settled.";
+    public static final String BITCOIN_PAYMENT_DISABLED = "Bitcoin payment is not currently available.";
     private final DatabaseHelper dbHelper;
     private final OpenFeatureAPI openFeatureAPI;
 
@@ -166,6 +172,48 @@ public class OrderController {
     @Operation(summary = "Update the credit card order status")
     public ResponseEntity<StandardResponse> updateStatus(@PathVariable String id, @RequestBody StatusRequest request) {
         return handleNewStatus(id, request);
+    }
+
+    @PostMapping(value="/{id}/bitcoin-payment", consumes={"application/json", "application/xml"})
+    @Operation(summary = "Initiate a bitcoin payment for an existing credit card order")
+    public ResponseEntity<StandardResponse> initiateBitcoinPayment(@PathVariable String id,
+            @RequestBody BitcoinPaymentRequest request) {
+        logger.info("Initiating bitcoin payment for order: " + id);
+
+        final Client client = openFeatureAPI.getClient();
+        if (!client.getBooleanValue("bitcoin_payment", false)) {
+            return buildResponseEntity(HttpStatus.SERVICE_UNAVAILABLE, BITCOIN_PAYMENT_DISABLED,
+                    null, null, null);
+        }
+
+        if (!id.equals(request.orderId())) {
+            return buildResponseEntity(HttpStatus.BAD_REQUEST, ORDER_IDS_DO_NOT_MATCH,
+                    null, request, null);
+        }
+
+        try (Connection conn = dbHelper.getConnection()) {
+            if (!dbHelper.orderExists(conn, id)) {
+                return buildResponseEntity(HttpStatus.NOT_FOUND, String.format(NO_STATUS_FOR_ID, id),
+                        null, null, null);
+            }
+
+            // Persist the settlement details as JSON in the status Details column so the
+            // background scheduler can settle the payment off the request path. This keeps
+            // the request fast even though the downstream provider is slow (multi-second).
+            BitcoinSettlementRequest settlement = new BitcoinSettlementRequest(
+                    id, request.amount(), request.currency(), request.walletAddress());
+            String details = new ObjectMapper().writeValueAsString(settlement);
+            dbHelper.insertNewStatus(id, StatusType.BITCOIN_PAYMENT_PENDING, details);
+
+            return buildResponseEntity(HttpStatus.ACCEPTED, BITCOIN_PAYMENT_ACCEPTED,
+                    new BitcoinPaymentResponse(id, StatusType.BITCOIN_PAYMENT_PENDING.getType()), null, null);
+        } catch (SQLException e) {
+            return handleSQLException(e);
+        } catch (JsonProcessingException e) {
+            logger.error("Failed to serialize bitcoin settlement details", e);
+            return buildResponseEntity(HttpStatus.INTERNAL_SERVER_ERROR, "An exception occurred!",
+                    null, null, e.getMessage(), true);
+        }
     }
 
     /**
