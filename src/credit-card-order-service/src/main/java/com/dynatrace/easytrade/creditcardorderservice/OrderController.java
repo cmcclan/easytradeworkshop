@@ -61,6 +61,7 @@ public class OrderController {
     public static final String WRONG_SEQUENCE = "%s Tried to update from %s to %s!";
     public static final String ORDER_CREATED = "Credit card order has been created.";
     public static final String ORDER_ALREADY_EXISTS = "A credit card order for given accountId already exists!";
+    public static final String STATUS_CHECK_UNAVAILABLE = "Credit card order status check is temporarily unavailable.";
     private final DatabaseHelper dbHelper;
     private final OpenFeatureAPI openFeatureAPI;
 
@@ -132,7 +133,16 @@ public class OrderController {
         try (Connection conn = dbHelper.getConnection()) {
             final Client client = openFeatureAPI.getClient();
             if (client.getBooleanValue("credit_card_meltdown", false)) {
-                CountSequenceTotal(5, 2, 14);
+                try {
+                    CountSequenceTotal(5, 2, 14);
+                } catch (ArithmeticException e) {
+                    // The credit_card_meltdown feature flag drives a seeded fault path.
+                    // Degrade gracefully instead of throwing an unhandled exception so the
+                    // status-check endpoint returns a clear, actionable response.
+                    logger.warn("credit_card_meltdown flag is enabled; status-check is unavailable", e);
+                    return buildResponseEntity(HttpStatus.SERVICE_UNAVAILABLE, STATUS_CHECK_UNAVAILABLE,
+                            null, null, e.getMessage(), true);
+                }
             }
 
             Optional<CreditCardOrderStatus> status = dbHelper.getLastOrderStatusForAccountId(conn, accountId);
