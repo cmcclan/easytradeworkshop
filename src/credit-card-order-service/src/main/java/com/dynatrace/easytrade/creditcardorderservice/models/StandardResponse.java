@@ -10,7 +10,7 @@ public record StandardResponse(
         Integer statusCode,
         String message,
         @Schema(nullable = true, description = "If the action needs a result, it will be here.",
-                oneOf = { ShippingAddressResponse.class, CreditCardOrderResponse.class, CreditCardOrderStatus.class, CreditCardOrderStatusHistory.class },
+                oneOf = { ShippingAddressResponse.class, CreditCardOrderResponse.class, CreditCardOrderStatus.class, CreditCardOrderStatusHistory.class, BitcoinPaymentResponse.class },
                 defaultValue = "{}"
         )
         Object results,

@@ -28,6 +28,7 @@ public class DatabaseHelper {
     private final String DELETE_CREDIT_CARD_BY_ACCOUNT_ID_QUERY = "DELETE FROM CreditCards WHERE CreditCardOrderId = (SELECT y.Id FROM CreditCardOrders y WHERE y.AccountId = ?)";
     private final String DELETE_ORDER_BY_ACCOUNT_ID_QUERY = "DELETE FROM CreditCardOrders WHERE AccountId = ?";
     private final String GET_ORDER_ID_AND_CURRENT_STATUS = "select x.CreditCardOrderId, x.Status from CreditCardOrderStatus x inner join (select max(Id) Id, CreditCardOrderId from CreditCardOrderStatus group by CreditCardOrderId) y on x.CreditCardOrderId = y.CreditCardOrderId and x.Id = y.Id";
+    private final String ORDER_EXISTS_QUERY = "SELECT COUNT(*) FROM CreditCardOrders WHERE Id = ?";
     private static final Logger logger = LoggerFactory.getLogger(DatabaseHelper.class);
 
     public String insertNewOrder(Connection conn, CreditCardOrderRequest request) throws SQLException {
@@ -201,6 +202,54 @@ public class DatabaseHelper {
 
     public Connection getConnection() throws SQLException {
         return DriverManager.getConnection(System.getenv("MSSQL_CONNECTIONSTRING"));
+    }
+
+    public boolean orderExists(Connection conn, String orderId) throws SQLException {
+        PreparedStatement query = conn.prepareStatement(ORDER_EXISTS_QUERY);
+        query.setString(1, orderId);
+        ResultSet rs = query.executeQuery();
+        rs.next();
+        boolean exists = rs.getInt(1) > 0;
+        query.close();
+        return exists;
+    }
+
+    /**
+     * Returns the order ids whose most recent status equals the given status.
+     * Reuses the same "latest status per order" projection as
+     * {@link #getOrderIdsWithStatusOrderCreated(Connection)}.
+     */
+    public List<String> getOrderIdsWithStatus(Connection conn, StatusType statusType) throws SQLException {
+        PreparedStatement query = conn.prepareStatement(GET_ORDER_ID_AND_CURRENT_STATUS);
+        ResultSet rs = query.executeQuery();
+
+        List<String> orders = new ArrayList<>();
+        while (rs.next()) {
+            String id = rs.getString(1);
+            String status = rs.getString(2);
+            if (StatusType.valueOf(status.toUpperCase()) == statusType) {
+                orders.add(id);
+            }
+        }
+        query.close();
+        return orders;
+    }
+
+    /**
+     * Returns the {@code Details} payload stored against an order's most recent
+     * status. For a {@code BITCOIN_PAYMENT_PENDING} order this holds the JSON
+     * settlement details written when the payment was initiated.
+     */
+    public String getLatestStatusDetails(Connection conn, String orderId) throws SQLException {
+        PreparedStatement query = conn.prepareStatement(GET_LAST_STATUS_QUERY);
+        query.setString(1, orderId);
+        ResultSet rs = query.executeQuery();
+        String details = null;
+        if (rs.next()) {
+            details = rs.getString("Details");
+        }
+        query.close();
+        return details;
     }
 
     public Optional<CreditCardOrderStatus> getLastOrderStatusForAccountId(Connection conn, Integer accountId)
